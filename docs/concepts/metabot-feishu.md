@@ -105,28 +105,39 @@ METABOT_PERSISTENT_EXECUTOR=true
 
 ## 🛠 3. PM2 启动与管理
 
-MetaBot 安装器自动配置 PM2 进程管理。配置文件 `ecosystem.config.cjs`，进程名 `metabot`。
+MetaBot 使用 PM2 进程守护。配置文件 `ecosystem.config.cjs`，进程名 `metabot`。
 
 ```bash
-# 启动（安装器已自动执行）
+# 启动
 pm2 start ecosystem.config.cjs
 
-# 常用管理命令
+# 常用管理
 pm2 status                # 查看进程状态
 pm2 logs metabot          # 实时日志
 pm2 restart metabot       # 重启（代码改动后）
 pm2 stop metabot          # 停止
 pm2 delete metabot        # 删除进程
-
-# 更新 MetaBot（拉代码 → npm install → 构建 → 重启）
-metabot update
 ```
-`metabot update` 会一并更新已安装的 lark-cli 和飞书/Lark skills，并同步到 bot 工作目录。
 
 PM2 守护特性：
 - 进程崩溃自动重启（最多 10 次，间隔 3 秒）
 - 日志写入 `logs/` 目录（`error.log` + `out.log`，自动加时间戳）
 - 开机自启：`pm2 save && pm2 startup`
+
+### 更新方式
+
+官网标准的 `metabot update` 依赖 `metabot/.git`（独立 git 仓库 + CLI 在 PATH）。本项目的 metabot 已纳入项目 git，更新走项目流程：
+
+```bash
+# 拉取项目最新代码（metabot 一起更新）
+git pull
+
+# 如果 metabot 依赖有变化，手动构建
+cd metabot && npm install && npm run build
+
+# 重启
+pm2 restart metabot
+```
 
 ### ⚠️ Windows 下 PM2 不能用 tsx wrapper
 
