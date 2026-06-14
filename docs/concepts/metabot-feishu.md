@@ -95,7 +95,7 @@ METABOT_PERSISTENT_EXECUTOR=true
 
 ### ⚠️ 事件订阅必须先启动服务
 
-飞书「长连接」模式保存时会立即验证 WebSocket 连接。如果 MetaBot 还没跑起来，保存会失败。**先 `npm run dev` 启动服务，再配置事件。**
+飞书「长连接」模式保存时会立即验证 WebSocket 连接。如果 MetaBot 还没跑起来，保存会失败。**先用 PM2 启动服务，再配置事件。**
 
 ### ⚠️ 应用发布后搜不到机器人
 
@@ -103,18 +103,33 @@ METABOT_PERSISTENT_EXECUTOR=true
 
 ---
 
-## 🛠 3. 启动与使用
+## 🛠 3. PM2 启动与管理
+
+MetaBot 安装器自动配置 PM2 进程管理。配置文件 `ecosystem.config.cjs`，进程名 `metabot`。
 
 ```bash
-# 开发模式（热重载）
-npm run dev
+# 启动（安装器已自动执行）
+pm2 start ecosystem.config.cjs
 
-# 生产模式
-npm run build && npm start
+# 常用管理命令
+pm2 status                # 查看进程状态
+pm2 logs metabot          # 实时日志
+pm2 restart metabot       # 重启（代码改动后）
+pm2 stop metabot          # 停止
+pm2 delete metabot        # 删除进程
 
-# 更新
-metabot update
+# 更新 MetaBot
+metabot update             # 拉代码 → 构建 → 重启
 ```
+
+PM2 守护特性：
+- 进程崩溃自动重启（最多 10 次，间隔 3 秒）
+- 日志写入 `logs/` 目录（`error.log` + `out.log`，自动加时间戳）
+- 开机自启：`pm2 save && pm2 startup`
+
+### ⚠️ Windows 下 PM2 不能用 tsx wrapper
+
+`node_modules/.bin/tsx` 是 POSIX shell 脚本，没有 `.cmd` 包装器，PM2 的 `child_process.spawn` 在 Windows 下无法执行。`ecosystem.config.cjs` 已适配：`interpreter: 'node'` + `interpreter_args: '--import tsx'`，跨平台通用。
 
 启动后在飞书搜索机器人名字，发消息即可。Claude 的响应会以流式卡片形式实时更新。
 
