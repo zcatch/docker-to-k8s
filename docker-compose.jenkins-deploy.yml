@@ -1,0 +1,26 @@
+# ============================================================
+# Jenkins CI/CD 部署覆盖
+#
+# 使用方式（Jenkins Pipeline 里）：
+#   docker-compose -f docker-compose.yml -f docker-compose.jenkins-deploy.yml up -d --build
+#
+# 关键：去掉所有 bind mount（配置已打入镜像）
+#       Jenkins 通过 docker.sock 调宿主机 Docker，bind mount 路径对不上
+# ============================================================
+
+services:
+
+  php:
+    # 去掉 dev 的 bind mount 覆盖，配置文件已在 Dockerfile 里 COPY 进镜像
+    volumes: []
+    # 去掉 develop.watch（部署不需要热重载）
+    develop:
+      watch: []
+
+  nginx:
+    # 用自定义镜像（配置在 docker/nginx/Dockerfile 里 COPY 进去）
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+    # 去掉绑挂
+    volumes: []
