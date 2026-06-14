@@ -118,9 +118,10 @@ pm2 restart metabot       # 重启（代码改动后）
 pm2 stop metabot          # 停止
 pm2 delete metabot        # 删除进程
 
-# 更新 MetaBot
-metabot update             # 拉代码 → 构建 → 重启
+# 更新 MetaBot（拉代码 → npm install → 构建 → 重启）
+metabot update
 ```
+`metabot update` 会一并更新已安装的 lark-cli 和飞书/Lark skills，并同步到 bot 工作目录。
 
 PM2 守护特性：
 - 进程崩溃自动重启（最多 10 次，间隔 3 秒）
