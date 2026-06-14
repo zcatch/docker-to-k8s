@@ -1,0 +1,133 @@
+﻿# ============================================================
+# 阶段1：builder（编译阶段）
+# 任务：安装所有编译工具、构建 PHP 扩展、安装 Composer
+# 结果：整个阶段构建完就丢弃，不进最终镜像，仅提取产物
+# ============================================================
+
+# ── FROM：指定基础镜像，AS builder 给这个阶段起名字（后面 COPY 靠它引用）──
+FROM php:8.2-fpm AS builder
+
+# ── RUN：在镜像构建时执行 shell 命令（每个 RUN 生成一个新镜像层）──
+# ── apt-get update：更新 Debian 软件包索引（必须先 update 才能 install）──
+# ── apt-get install -y：安装包，-y 表示所有确认提示自动回答 yes ──
+# ── --no-install-recommends：只安装必须的依赖，跳过"推荐"包，减小体积 ──
+# ── &&：shell 的逻辑与，前面成功才执行后面（失败则立即停止构建）──
+# ── rm -rf /var/lib/apt/lists/*：删除 apt 下载缓存，不让这层带垃圾 ──
+# ── -dev 后缀的包 = 开发包，包含头文件(.h)和编译工具，用于编译扩展 ──
+# ── libpng-dev：PNG 图片的开发头文件 ──
+# ── libjpeg-dev：JPEG 图片的开发头文件 ──
+# ── libfreetype6-dev：FreeType 字体引擎开发头文件 ──
+# ── libzip-dev：ZIP 压缩库的开发头文件 ──
+# ── libonig-dev：正则表达式库的开发头文件 ──
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpng-dev \
+        libjpeg-dev \
+        libfreetype6-dev \
+        libzip-dev \
+        libonig-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── docker-php-ext-configure：PHP 官方镜像内置脚本，配置扩展的编译参数 ──
+# ── --with-freetype：让 GD 扩展支持 TrueType 字体处理 ──
+# ── --with-jpeg：让 GD 扩展支持 JPEG 图片读写 ──
+RUN docker-php-ext-configure gd --with-freetype --with-jpeg
+
+# ── docker-php-ext-install：PHP 官方镜像内置脚本，编译并安装核心扩展 ──
+# ── -j$(nproc)：并行编译，$(nproc) = CPU 核心数，比如 8 核就同时跑 8 个编译任务 ──
+# ── pdo_mysql：PDO 方式连接 MySQL（推荐，支持预处理语句防 SQL 注入）──
+# ── mysqli：面向过程/对象方式连接 MySQL ──
+# ── gd：图片处理（缩放、裁剪、加水印），依赖 libpng / libjpeg / libfreetype ──
+# ── mbstring：多字节字符串处理（UTF-8 中文必备）──
+# ── zip：压缩 / 解压 ZIP 文件 ──
+# ── opcache：PHP 字节码缓存，生产环境性能提升 2-5 倍 ──
+# ── bcmath：高精度数学运算（金额计算必备，避免浮点精度丢失）──
+# ── exif：读取图片 EXIF 元数据（拍摄时间、GPS 坐标等）──
+RUN docker-php-ext-install -j$(nproc) \
+        pdo_mysql \
+        mysqli \
+        gd \
+        mbstring \
+        zip \
+        opcache \
+        bcmath \
+        exif
+
+# ── pecl：PHP 扩展社区仓库（PECL），安装非 PHP 内置的第三方扩展 ──
+# ── redis：Redis 客户端扩展，PHP 连接 Redis 的核心驱动 ──
+# ── docker-php-ext-enable：生成扩展的 .ini 配置文件，让 PHP 启动时加载该扩展 ──
+RUN pecl install redis && docker-php-ext-enable redis
+
+# ── Composer：PHP 依赖管理工具，类似 Node 的 npm / Java 的 Maven ──
+# ── php -r "copy(...)"：用 PHP 从网络下载 Composer 安装脚本 ──
+# ── --install-dir=/usr/bin：安装到系统可执行文件目录，之后直接敲 composer 就能用 ──
+# ── --filename=composer：指定文件名为 composer（不加 .phar 后缀）──
+# ── php -r "unlink(...)"：安装完成后删除安装脚本，不残留垃圾文件 ──
+# ── 注意：Composer 只装在 builder 阶段，production 阶段不会带走 ──
+RUN php -r "copy('https://getcomposer.org/installer', 'composer-setup.php');" \
+    && php composer-setup.php --install-dir=/usr/bin --filename=composer \
+    && php -r "unlink('composer-setup.php');"
+
+
+# ============================================================
+# 阶段2：production（运行阶段）
+# 任务：从 builder 只拷走编译好的产物，装最少的运行时依赖
+# 结果：这就是最终镜像 — 小、干净、没有编译器、没有 dev 头文件
+# ============================================================
+
+# ── 新的 FROM = 全新空白起点，builder 阶段的一切自动丢弃，不会进入最终镜像 ──
+FROM php:8.2-fpm
+
+# ── 这里只装"运行时库"（不带 -dev 后缀），和 builder 形成对比 ──
+# ── libpng16-16t64：PNG 图片运行时动态链接库（.so 文件）──
+# ── libjpeg62-turbo：JPEG 运行时动态链接库 ──
+# ── libfreetype6：字体渲染运行时动态链接库 ──
+# ── libzip5：ZIP 处理运行时动态链接库 ──
+# ── libonig5：正则表达式运行时动态链接库 ──
+# ── 对比 builder 装了 16 个包（约 10MB），这里只装 4 个新包（约 2.3MB）──
+# ── libonig5 已在基础镜像中，仅新增 4 个 ──
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        libpng16-16t64 \
+        libjpeg62-turbo \
+        libfreetype6 \
+        libzip5 \
+        libonig5 \
+    && rm -rf /var/lib/apt/lists/*
+
+# ── COPY --from=builder：从 builder 阶段精确拷贝文件（不携带 builder 的编译垃圾）──
+# ── /usr/local/lib/php/extensions：PHP 扩展编译产物目录 ──
+# ──   里面是 .so 文件（Linux 动态链接库），比如 gd.so / redis.so / opcache.so ──
+COPY --from=builder /usr/local/lib/php/extensions /usr/local/lib/php/extensions
+
+# ── /usr/local/etc/php/conf.d：PHP 扩展的启用配置文件目录 ──
+# ──   每个扩展对应一个 .ini 文件，内容类似 extension=redis.so ──
+COPY --from=builder /usr/local/etc/php/conf.d /usr/local/etc/php/conf.d
+
+# ── COPY：从宿主机（你的 Windows 目录）拷贝文件到镜像内部 ──
+# ── ./docker/php/php.ini → 放到容器的 conf.d 目录下 ──
+# ──   PHP 启动时按文件名字母顺序加载 conf.d 下所有 .ini 文件 ──
+COPY ./docker/php/php.ini /usr/local/etc/php/conf.d/custom.ini
+
+# ── ./docker/php/www.conf → PHP-FPM 进程池配置 ──
+# ──   控制 FPM 的进程管理模式（dynamic）、最大子进程数(pm.max_children)等 ──
+COPY ./docker/php/www.conf /usr/local/etc/php-fpm.d/www.conf
+
+# ── mkdir -p：创建目录，-p 表示父目录不存在时逐级创建，不会因为目录已存在而报错 ──
+# ── chown www-data:www-data：将目录所有权改为 www-data 用户和组 ──
+# ──   www-data 是 Debian/Ubuntu 上 Web 服务（Nginx / PHP-FPM）的默认运行用户 ──
+# ──   不改所有者的话，PHP-FPM 没有权限往该目录写日志 ──
+RUN mkdir -p /var/log/php && chown www-data:www-data /var/log/php
+
+# ── WORKDIR：设置工作目录，后续 RUN / CMD / COPY 的相对路径都以此为基准 ──
+# ──   等价于执行 cd /var/www/html ──
+WORKDIR /var/www/html
+
+# ── EXPOSE：声明容器内部监听的端口（纯文档性质，不实际开放端口）──
+# ──   真正把端口映射到宿主机需要通过 docker run -p 或 docker-compose ports ──
+# ──   9000 是 PHP-FPM 的默认 FastCGI 通信端口 ──
+EXPOSE 9000
+
+# ── CMD：容器启动时执行的默认命令（可被 docker run 后面跟的命令覆盖）──
+# ──   ["php-fpm"] = exec 形式（JSON 数组），直接以 PID 1 运行 php-fpm ──
+# ──   不用 shell 形式（CMD php-fpm）是为了让 FPM 能正确接收 Linux 信号 ──
+# ──   比如 docker stop 发 SIGTERM 信号时，FPM 能优雅关闭而不是被强制杀死 ──
+CMD ["php-fpm"]

@@ -1,0 +1,17 @@
+# 环境变量（含密码）
+.env
+.claude/settings.local.json
+
+# 二进制文件（Dockerfile 里直接下载 Linux 版）
+docker/jenkins/docker.exe
+
+# Docker 数据
+docker-compose.override.yml
+
+# IDE
+.vscode/
+.idea/
+
+# 系统文件
+.DS_Store
+Thumbs.db

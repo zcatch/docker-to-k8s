@@ -1,0 +1,38 @@
+﻿# ============================================================
+# 生产环境覆盖
+# 使用方式：docker-compose -f docker-compose.yml -f docker-compose.prod.yml up -d
+# ============================================================
+
+services:
+
+  php:
+    restart: always
+    # ── 生产版 php.ini：display_errors=Off, OPcache 不检查文件变更 ──
+    # ── 网络已在 base 文件定义，无需重复 ──
+    volumes:
+      - ./docker/php/php.ini.prod:/usr/local/etc/php/conf.d/custom.ini
+    # ── 资源限制：防止某个容器吃光宿主机 CPU/内存 ──
+    mem_limit: 512m
+    cpus: "2"
+
+  nginx:
+    restart: always
+    ports:
+      - "80:80"
+    mem_limit: 256m
+    cpus: "1"
+
+  mysql:
+    restart: always
+    # ── 生产环境一般也暴露数据库端口（方便运维排查）──
+    # ── 更高安全要求时注释掉这行，只允许 app-network 内通信 ──
+    ports:
+      - "3306:3306"
+    mem_limit: 1g
+    cpus: "2"
+
+  redis:
+    restart: always
+    # ── 生产环境 Redis 通常不暴露端口，只通过 app-network 内网访问 ──
+    mem_limit: 256m
+    cpus: "0.5"

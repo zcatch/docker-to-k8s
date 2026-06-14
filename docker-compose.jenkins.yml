@@ -1,0 +1,54 @@
+# ============================================================
+# Jenkins CI/CD 服务
+#
+# 使用方式：
+#   # 首次：构建自定义镜像（约 3 分钟）
+#   docker-compose -f docker-compose.jenkins.yml build
+#
+#   # 启动 Jenkins
+#   docker-compose -f docker-compose.jenkins.yml up -d
+#
+#   # 查看初始密码
+#   docker exec -it myapp-jenkins cat /var/jenkins_home/secrets/initialAdminPassword
+#
+# 访问地址：http://localhost:8082
+# ============================================================
+
+services:
+
+  jenkins:
+    # ── 用自定义 Dockerfile 构建（含 Docker CLI + 镜像源）──
+    build:
+      context: ./docker/jenkins
+      dockerfile: Dockerfile
+    image: myapp-jenkins:local
+    container_name: myapp-jenkins
+    restart: unless-stopped
+
+    ports:
+      - "8082:8080"         # Jenkins Web UI
+      - "50000:50000"       # 代理节点通信
+
+    environment:
+      - TZ=Asia/Shanghai
+
+    volumes:
+      # Jenkins 数据持久化（插件、配置、任务等）
+      - jenkins-data:/var/jenkins_home
+      # 挂载宿主机 Docker 套接字（Jenkins 容器内 docker 命令连宿主机 Engine）
+      - /var/run/docker.sock:/var/run/docker.sock
+
+    networks:
+      - app-network
+
+    # root 用户才能读写 docker.sock
+    user: root
+
+# 自定义网络（如果主服务已运行则复用 myapp_app-network，否则自动创建）
+networks:
+  app-network:
+    driver: bridge
+
+# Jenkins 数据持久化卷
+volumes:
+  jenkins-data:

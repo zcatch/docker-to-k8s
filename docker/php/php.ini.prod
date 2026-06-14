@@ -1,0 +1,31 @@
+﻿; ============================================================
+; PHP 生产环境配置
+; display_errors = Off   → 不暴露代码路径和敏感信息
+; validate_timestamps = 0 → 永远用缓存，改代码需重启 FPM
+; ============================================================
+
+[PHP]
+upload_max_filesize = 100M
+post_max_size = 100M
+max_execution_time = 300
+max_input_time = 300
+memory_limit = 512M
+
+; ── 生产环境：绝不在页面上显示错误 ──
+display_errors = Off
+
+log_errors = On
+error_log = /var/log/php/error.log
+date.timezone = Asia/Shanghai
+default_socket_timeout = 300
+
+[opcache]
+opcache.enable=1
+opcache.memory_consumption=128
+opcache.interned_strings_buffer=8
+opcache.max_accelerated_files=4000
+
+; ── 生产环境：不检查文件修改时间，性能最优 ──
+opcache.validate_timestamps=0
+
+opcache.save_comments=1
