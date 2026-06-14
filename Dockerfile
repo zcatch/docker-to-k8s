@@ -77,6 +77,9 @@ COPY ./docker/php/www.conf /usr/local/etc/php-fpm.d/www.conf
 
 RUN mkdir -p /var/log/php && chown www-data:www-data /var/log/php && chmod 775 /var/log/php
 
+# ── 应用代码 ──
+COPY ./public /var/www/html/public
+
 WORKDIR /var/www/html
 
 EXPOSE 9000
