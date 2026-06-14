@@ -1,0 +1,131 @@
+# ============================================================
+# Jenkins CI/CD 部署专用 Compose（独立文件，不继承 base）
+#
+# 与 docker-compose.yml 的区别：
+#   - 去掉了所有 bind mount（配置已打入镜像）
+#   - 去掉了 develop.watch（部署不需要热重载）
+#   - 去掉了 debug profile（Adminer）
+#   - 暴露 8080 端口
+#
+# 原因：Jenkins 通过 docker.sock 调宿主机 Docker
+#       bind mount 的路径是容器内路径，宿主机不认识
+# ============================================================
+
+services:
+
+  php:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: myapp-php
+    restart: unless-stopped
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pidof php-fpm || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+    networks:
+      - app-network
+
+
+  nginx:
+    build:
+      context: ./docker/nginx
+      dockerfile: Dockerfile
+    container_name: myapp-nginx
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD-SHELL", "pidof nginx || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+    depends_on:
+      php:
+        condition: service_healthy
+
+    networks:
+      - app-network
+
+
+  mysql:
+    image: mysql:8.0
+    container_name: myapp-mysql
+    restart: unless-stopped
+    command: --default-authentication-plugin=mysql_native_password
+
+    environment:
+      MYSQL_ROOT_PASSWORD: ${MYSQL_ROOT_PASSWORD}
+      MYSQL_DATABASE: ${MYSQL_DATABASE}
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 20s
+
+    volumes:
+      - mysql-data:/var/lib/mysql
+
+    networks:
+      - app-network
+
+
+  redis:
+    image: redis:7-alpine
+    container_name: myapp-redis
+    restart: unless-stopped
+    command: redis-server --requirepass ${REDIS_PASSWORD}
+
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a $$REDIS_PASSWORD ping | grep -q PONG"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 5s
+
+    networks:
+      - app-network
+
+
+networks:
+  app-network:
+    driver: bridge
+
+volumes:
+  mysql-data:
