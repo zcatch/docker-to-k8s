@@ -38,3 +38,4 @@
 |--------|---------|
 | 4.1 Git 进阶 | _待学习_ |
 | 4.4 Jenkins | [jenkins-setup.md](jenkins-setup.md) |
+| 实践项目 | [blog-cicd-setup.md](blog-cicd-setup.md) — 博客项目接入 CI/CD |

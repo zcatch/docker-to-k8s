@@ -223,6 +223,100 @@ push 到 GitHub 后 Jenkins 重新构建即可。
 
 ---
 
+## 🛠 5. Git 自动触发（Poll SCM）
+
+前面的 Pipeline 配好了，但每次都要手动点"立即构建"。真正的 CI/CD 应该是 **push 代码 → 自动触发部署**。
+
+### 两种触发方式
+
+| | Poll SCM（轮询） | Webhook（钩子） |
+|---|---|---|
+| **谁主动** | Jenkins 定时问 GitHub"有新代码吗？" | GitHub 主动通知 Jenkins"我更新了！" |
+| **实时性** | 有延迟（比如每 2 分钟查一次） | 几乎实时（push 即触发） |
+| **网络要求** | Jenkins 能访问 GitHub 即可 | GitHub **必须能访问** Jenkins |
+| **本地能用？** | ✅ 直接可用 | ❌ Jenkins 在 localhost，GitHub 访问不到 |
+| **生产环境** | 浪费资源（空轮询也查） | ✅ 标准做法 |
+
+### Poll SCM 原理
+
+```
+Jenkins 定时器（cron 控制）
+        │
+        ▼
+每 N 分钟：git ls-remote <仓库>   ← 只查 HEAD 哈希值
+        │
+        ├── 哈希和上次一样 → 什么都不做
+        │
+        └── 哈希变了 → 触发构建（拉代码 → 构建 → 部署）
+```
+
+`git ls-remote` 只拉 commit hash，不拉代码，所以轮询本身开销很小。
+
+### 配置
+
+Jenkins Job 配置的底层是 XML 文件，存放在 `$JENKINS_HOME/jobs/<job名>/config.xml`。
+
+给 `<triggers/>` 加上 `SCMTrigger`：
+
+```xml
+<triggers>
+  <hudson.triggers.SCMTrigger>
+    <spec>H/2 * * * *</spec>
+    <ignorePostCommitHooks>false</ignorePostCommitHooks>
+  </hudson.triggers.SCMTrigger>
+</triggers>
+```
+
+**cron 表达式 `H/2 * * * *` 拆解：**
+
+| 字段 | 值 | 含义 |
+|---|---|---|
+| MINUTE | `H/2` | 每 2 分钟触发一次 |
+| HOUR | `*` | 每小时都生效 |
+| DOM | `*` | 每天 |
+| MONTH | `*` | 每月 |
+| DOW | `*` | 每周每天 |
+
+> 💡 `H`（Hash）是 Jenkins 特有语法：用 Job 名算一个固定秒数，避免所有 Job 在同一秒同时轮询。比如 `myapp-deploy` 可能在 1 分 23 秒触发，`blog-cms-deploy` 在 1 分 47 秒。用 `*` 也可以，但不推荐——所有 Job 会在同一时刻发起请求。
+
+**修改步骤：**
+
+```bash
+# 1. 停 Jenkins
+docker stop myapp-jenkins
+
+# 2. 用临时容器编辑 config.xml（因为 Jenkins 数据在命名卷里）
+docker run --rm -v myapp_jenkins-data:/jenkins-data alpine:latest sh -c "
+sed -i 's|<triggers/>|<triggers>
+    <hudson.triggers.SCMTrigger>
+      <spec>H/2 * * * *</spec>
+      <ignorePostCommitHooks>false</ignorePostCommitHooks>
+    </hudson.triggers.SCMTrigger>
+  </triggers>|' /jenkins-data/jobs/myapp-deploy/config.xml
+"
+
+# 3. 启 Jenkins
+docker start myapp-jenkins
+```
+
+> 也可以通过 Jenkins UI 配置：Job 页面 → 配置 → 构建触发器 → 勾选 "Poll SCM" → 填入 `H/2 * * * *`。但了解 XML 结构有助于理解 Jenkins 的底层存储方式。
+
+### ⚠️ sed 替换了两处 `<triggers/>`
+
+**现象：** 用 `sed "s|<triggers/>|..."` 替换时，把 `DeclarativeJobPropertyTrackerAction` 内部的 `<triggers/>` 也替换了。
+
+**原因：** Jenkins config.xml 里有两处 `<triggers/>`——一处是流水线元数据追踪器（记录脚本本身声明了什么触发器），一处是真正的 Job 触发器配置。
+
+**解决：** 不影响功能。Jenkins 只读底部真正的 `<triggers>` 配置来调度轮询。追踪器里的多余内容无害，可以不管，也可以在 Jenkins UI 里保存一次 Job 配置让它自动清理。
+
+### 如何区分自动 vs 手动触发
+
+构建历史页面里：
+- 手动触发：**"由用户 admin 启动"**
+- Poll SCM 触发：**"由 SCM 变更启动"**
+
+---
+
 ## 📁 项目文件索引
 
 | 文件 | 用途 |
