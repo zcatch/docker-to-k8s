@@ -315,6 +315,92 @@ docker start myapp-jenkins
 - 手动触发：**"由用户 admin 启动"**
 - Poll SCM 触发：**"由 SCM 变更启动"**
 
+### Jenkins 配置页面上的触发器选项说明
+
+打开 Job → 配置 → 构建触发器，里面有多个复选框，新手容易搞混：
+
+| 选项 | 行为 | 适用场景 |
+|---|---|---|
+| **Trigger builds remotely** | 通过 URL + token 调用 `curl` 触发 | 别的脚本/系统想触发 Jenkins |
+| **Build after other projects are built** | 上游 Job 构建完 → 自动触发本 Job | 多阶段流水线串联 |
+| **Build periodically** | 到点就构建，**不管代码有没有变** | 每日定时任务（如凌晨数据库备份） |
+| **☑ Poll SCM** | 到点先查 Git 有无新 commit，**有变化才构建** | 本地开发自动部署（我们用的） |
+| **GitHub hook trigger** | 被动等 GitHub 发 Webhook POST | 生产环境标准做法（需要公网 IP） |
+
+**Build periodically vs Poll SCM 的核心区别：**
+
+```
+Build periodically:  时间到 → 直接构建（即使代码没变）
+Poll SCM:            时间到 → git ls-remote 查一下 → 变了才构建，没变就跳过
+```
+
+另外，**General 里的 "GitHub project" 填了只是加一个链接**，方便从 Jenkins 跳回仓库，和触发完全无关。
+
+---
+
+## 🛠 6. Jenkins 配置管理：UI 点击 vs 直接改 XML
+
+新手可能会困惑：刚才明明可以直接在网页上勾选 Poll SCM，为什么要用命令行改 XML？
+
+### Jenkins 的双层存储模型
+
+你可以把 Jenkins 理解成一个"可视化 XML 编辑器"：
+
+```
+你在网页上勾选 Poll SCM，填入 H/2 * * * *
+                │
+                ▼
+        Jenkins 自动写出
+                │
+                ▼
+  /var/jenkins_home/jobs/myapp-deploy/config.xml
+                │
+                ├── <triggers>
+                │     <hudson.triggers.SCMTrigger>
+                │       <spec>H/2 * * * *</spec>
+                │     </hudson.triggers.SCMTrigger>
+                │   </triggers>
+```
+
+**UI 和 XML 改的是同一个东西。** UI 是"前端"，XML 是"数据库"。你在页面上勾一下，Jenkins 帮你写 XML；你直接改 XML 再重启，Jenkins 在页面上显示勾选状态。
+
+### 为什么我们直接改 XML
+
+因为 Jenkins 数据存在 Docker 命名卷里，**宿主机上没法直接用记事本打开**：
+
+```
+Docker 命名卷（myapp_jenkins-data）
+    │
+    └── 实际存放位置：/var/lib/docker/volumes/...（在 Docker Desktop 虚拟机里）
+            │
+            └── Windows 资源管理器访问不到 ❌
+```
+
+要改 XML 只能：
+1. **通过 Jenkins UI** —— 打开浏览器点点点（日常操作最方便）
+2. **通过临时容器** —— `docker run --rm -v myapp_jenkins-data:... alpine` 挂载卷进去改
+
+步骤 2 就是之前做的事情：启动一个临时的 Alpine Linux 容器，挂载同一个命名卷，用 `sed` 命令修改文件，容器退出后自动删除（`--rm`），不留痕迹。
+
+```
+docker run --rm -v myapp_jenkins-data:/jenkins-data alpine:latest sh -c "sed ..."
+    │                    │                                          │
+    │                    └── 把 Jenkins 数据卷挂到 /jenkins-data      │
+    │                                                                  │
+    └── 临时容器，执行完自动删除                                        │
+```
+
+### 用哪种方式？
+
+| | UI 配置 | 直接改 XML |
+|---|---|---|
+| **操作** | 浏览器勾选、填表单 | 命令行改文件 |
+| **需不需要停 Jenkins** | 不需要 | 需要（改完重启） |
+| **适合谁** | 日常使用、快速调整 | 批量管理、自动化脚本、理解原理 |
+| **学习价值** | 会用 Jenkins | 理解 Jenkins 底层 |
+
+> 💡 学习阶段两种都试一下：先理解了 XML 结构（知道 Jenkins 到底存了什么），以后用 UI 配置时脑子里有底，不会"勾了不知道发生了什么"。
+
 ---
 
 ## 📁 项目文件索引
