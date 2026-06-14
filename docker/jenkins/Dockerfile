@@ -17,6 +17,12 @@ RUN curl -fsSL "https://mirrors.tuna.tsinghua.edu.cn/docker-ce/linux/static/stab
     rm /tmp/docker.tgz && \
     docker --version
 
+# ── 安装 Docker Compose（独立二进制）──
+RUN curl -fsSL "https://github.com/docker/compose/releases/download/v2.29.1/docker-compose-linux-x86_64" \
+    -o /usr/local/bin/docker-compose && \
+    chmod +x /usr/local/bin/docker-compose && \
+    docker-compose version
+
 # ── 安装 Git（Pipeline 拉代码用）──
 RUN apt-get update && \
     apt-get install -y --no-install-recommends git && \
