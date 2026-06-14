@@ -1,0 +1,276 @@
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import * as os from 'node:os';
+import type { Logger } from '../../utils/logger.js';
+import type { EngineName } from '../types.js';
+
+export interface UserSession {
+  sessionId: string | undefined;
+  /** Engine that owns sessionId. Engine session stores are not interchangeable. */
+  sessionIdEngine?: EngineName;
+  workingDirectory: string;
+  lastUsed: number;
+  /** Cumulative token usage across all queries in this session */
+  cumulativeTokens: number;
+  /** Cumulative cost (USD) across all queries in this session */
+  cumulativeCostUsd: number;
+  /** Cumulative duration (ms) across all queries in this session */
+  cumulativeDurationMs: number;
+  /** Per-session model override (e.g. "claude-opus-4-7"). Falls back to bot default when undefined. */
+  model?: string;
+  /** Engine that owns model. Model names are engine-specific. */
+  modelEngine?: EngineName;
+  /** Per-session engine override. Falls back to bot default when undefined. */
+  engine?: EngineName;
+  /**
+   * Mirrored Claude /goal condition. The actual goal mechanism runs inside
+   * Claude Code (prompt-based Stop hook); we just remember the text so the
+   * Feishu card can show a persistent "🎯 Goal" badge across turns.
+   */
+  activeGoal?: string;
+  /** Wall-clock when the current goal was set (ms since epoch). */
+  goalSetAt?: number;
+}
+
+interface PersistedSession {
+  sessionId: string;
+  sessionIdEngine?: EngineName;
+  workingDirectory: string;
+  lastUsed: number;
+  cumulativeTokens?: number;
+  cumulativeCostUsd?: number;
+  cumulativeDurationMs?: number;
+  model?: string;
+  modelEngine?: EngineName;
+  engine?: EngineName;
+  activeGoal?: string;
+  goalSetAt?: number;
+}
+
+// Sessions never expire — user can /reset manually.
+// IMPORTANT: When switching a bot's defaultWorkingDirectory, do NOT delete
+// session files (~/.metabot/<bot>/sessions-*.json, sessions.db).
+// Old sessions must be preserved so the user can switch back to a previous
+// project and resume context. loadFromDisk() uses the new defaultWorkingDirectory
+// from config, not from the persisted session, so old sessions don't interfere.
+const SESSION_TTL_MS = Infinity;
+const MAX_SESSIONS = 10_000;
+
+export class SessionManager {
+  private sessions = new Map<string, UserSession>();
+  private cleanupTimer: ReturnType<typeof setInterval>;
+  private persistPath: string;
+
+  constructor(
+    private defaultWorkingDirectory: string,
+    private logger: Logger,
+    botName: string = 'default',
+  ) {
+    // Persist sessions to a file under the project data dir
+    const dataDir = process.env.SESSION_STORE_DIR
+      || path.join(os.homedir(), '.metabot');
+    fs.mkdirSync(dataDir, { recursive: true });
+    this.persistPath = path.join(dataDir, `sessions-${botName}.json`);
+
+    this.loadFromDisk();
+
+    // Periodic cleanup every hour
+    this.cleanupTimer = setInterval(() => this.cleanupExpired(), 60 * 60 * 1000);
+  }
+
+  getSession(chatId: string): UserSession {
+    let session = this.sessions.get(chatId);
+    if (!session) {
+      // Evict least-recently-used session if at capacity
+      if (this.sessions.size >= MAX_SESSIONS) {
+        this.evictOldest();
+      }
+      session = {
+        sessionId: undefined,
+        workingDirectory: this.defaultWorkingDirectory,
+        lastUsed: Date.now(),
+        cumulativeTokens: 0,
+        cumulativeCostUsd: 0,
+        cumulativeDurationMs: 0,
+      };
+      this.sessions.set(chatId, session);
+    }
+    session.lastUsed = Date.now();
+    return session;
+  }
+
+  private evictOldest(): void {
+    let oldestKey: string | undefined;
+    let oldestTime = Infinity;
+    for (const [key, s] of this.sessions) {
+      if (s.lastUsed < oldestTime) {
+        oldestTime = s.lastUsed;
+        oldestKey = key;
+      }
+    }
+    if (oldestKey) {
+      this.sessions.delete(oldestKey);
+      this.logger.debug({ chatId: oldestKey }, 'Evicted oldest session (capacity limit)');
+    }
+  }
+
+  setSessionId(chatId: string, sessionId: string, engine?: EngineName): void {
+    const session = this.getSession(chatId);
+    session.sessionId = sessionId;
+    session.sessionIdEngine = engine;
+    this.logger.debug({ chatId, sessionId: sessionId.slice(0, 8), engine }, 'Session ID updated');
+    this.saveToDisk();
+  }
+
+  /** Set per-session model override. Pass undefined to clear. */
+  setSessionModel(chatId: string, model: string | undefined, engine?: EngineName): void {
+    const session = this.getSession(chatId);
+    session.model = model;
+    session.modelEngine = model ? engine : undefined;
+    this.logger.info({ chatId, model, engine: session.modelEngine }, 'Session model override updated');
+    this.saveToDisk();
+  }
+
+  /**
+   * Set per-session engine override. Pass undefined to clear and fall back
+   * to the bot's configured engine. Switching engines also clears the prior
+   * `sessionId` (engines track conversation state in different stores) and
+   * any stale model override, so the next turn starts a fresh session.
+   */
+  setSessionEngine(chatId: string, engine: EngineName | undefined): void {
+    const session = this.getSession(chatId);
+    if (session.engine === engine) return;
+    session.engine = engine;
+    session.sessionId = undefined;
+    session.sessionIdEngine = undefined;
+    session.model = undefined;
+    session.modelEngine = undefined;
+    this.logger.info({ chatId, engine }, 'Session engine override updated (session reset)');
+    this.saveToDisk();
+  }
+
+  /**
+   * Set the mirrored /goal condition for this session. Pass undefined to
+   * clear it. The actual goal mechanism runs inside Claude Code; this is
+   * purely so the card can display a persistent badge.
+   */
+  setGoal(chatId: string, condition: string | undefined): void {
+    const session = this.getSession(chatId);
+    if (condition) {
+      session.activeGoal = condition;
+      session.goalSetAt = Date.now();
+    } else {
+      session.activeGoal = undefined;
+      session.goalSetAt = undefined;
+    }
+    this.logger.info({ chatId, hasGoal: !!condition }, 'Session goal updated');
+    this.saveToDisk();
+  }
+
+  /** Accumulate token/cost/duration from a completed query into the session totals. */
+  addUsage(chatId: string, tokens: number, costUsd: number, durationMs: number): void {
+    const session = this.getSession(chatId);
+    session.cumulativeTokens += tokens;
+    session.cumulativeCostUsd += costUsd;
+    session.cumulativeDurationMs += durationMs;
+    this.saveToDisk();
+  }
+
+  resetSession(chatId: string): void {
+    const session = this.sessions.get(chatId);
+    if (session) {
+      session.sessionId = undefined;
+      session.sessionIdEngine = undefined;
+      session.cumulativeTokens = 0;
+      session.cumulativeCostUsd = 0;
+      session.cumulativeDurationMs = 0;
+      session.activeGoal = undefined;
+      session.goalSetAt = undefined;
+      // Keep working directory
+      this.logger.info({ chatId }, 'Session reset');
+      this.saveToDisk();
+    }
+  }
+
+  private cleanupExpired(): void {
+    const now = Date.now();
+    let changed = false;
+    for (const [chatId, session] of this.sessions) {
+      if (now - session.lastUsed > SESSION_TTL_MS) {
+        this.sessions.delete(chatId);
+        this.logger.debug({ chatId }, 'Expired session cleaned up');
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.saveToDisk();
+    }
+  }
+
+  private saveToDisk(): void {
+    try {
+      const data: Record<string, PersistedSession> = {};
+      for (const [chatId, session] of this.sessions) {
+        // Persist sessions that have a sessionId, model, engine override, or active goal
+        if (session.sessionId || session.model || session.engine || session.activeGoal) {
+          data[chatId] = {
+            sessionId: session.sessionId || '',
+            sessionIdEngine: session.sessionIdEngine,
+            workingDirectory: session.workingDirectory,
+            lastUsed: session.lastUsed,
+            cumulativeTokens: session.cumulativeTokens,
+            cumulativeCostUsd: session.cumulativeCostUsd,
+            cumulativeDurationMs: session.cumulativeDurationMs,
+            model: session.model,
+            modelEngine: session.modelEngine,
+            engine: session.engine,
+            activeGoal: session.activeGoal,
+            goalSetAt: session.goalSetAt,
+          };
+        }
+      }
+      fs.writeFileSync(this.persistPath, JSON.stringify(data, null, 2), 'utf-8');
+    } catch (err) {
+      this.logger.warn({ err }, 'Failed to persist sessions to disk');
+    }
+  }
+
+  private loadFromDisk(): void {
+    try {
+      if (!fs.existsSync(this.persistPath)) return;
+      const raw = fs.readFileSync(this.persistPath, 'utf-8');
+      const data: Record<string, PersistedSession> = JSON.parse(raw);
+      const now = Date.now();
+      let loaded = 0;
+      for (const [chatId, persisted] of Object.entries(data)) {
+        // Skip expired sessions
+        if (now - persisted.lastUsed > SESSION_TTL_MS) continue;
+        this.sessions.set(chatId, {
+          sessionId: persisted.sessionId || undefined,
+          sessionIdEngine: persisted.sessionIdEngine,
+          workingDirectory: persisted.workingDirectory,
+          lastUsed: persisted.lastUsed,
+          cumulativeTokens: persisted.cumulativeTokens ?? 0,
+          cumulativeCostUsd: persisted.cumulativeCostUsd ?? 0,
+          cumulativeDurationMs: persisted.cumulativeDurationMs ?? 0,
+          model: persisted.model,
+          modelEngine: persisted.modelEngine,
+          engine: persisted.engine,
+          activeGoal: persisted.activeGoal,
+          goalSetAt: persisted.goalSetAt,
+        });
+        loaded++;
+      }
+      if (loaded > 0) {
+        this.logger.info({ loaded, path: this.persistPath }, 'Restored sessions from disk');
+      }
+    } catch (err) {
+      this.logger.warn({ err }, 'Failed to load sessions from disk, starting fresh');
+    }
+  }
+
+  destroy(): void {
+    clearInterval(this.cleanupTimer);
+    this.saveToDisk();
+  }
+}

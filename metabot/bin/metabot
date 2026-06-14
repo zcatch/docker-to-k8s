@@ -1,0 +1,289 @@
+#!/usr/bin/env bash
+# metabot - MetaBot management CLI
+# Usage: metabot update | start | stop | restart | logs | status
+
+set -euo pipefail
+
+# Resolve METABOT_HOME: env var > script's parent dir (follows symlinks) > $HOME/metabot
+if [[ -z "${METABOT_HOME:-}" ]]; then
+  _src="${BASH_SOURCE[0]}"
+  if command -v readlink &>/dev/null; then
+    _src="$(readlink -f "$_src" 2>/dev/null || echo "$_src")"
+  fi
+  _sd="$(cd "$(dirname "$_src")/.." 2>/dev/null && pwd)" || _sd=""
+  if [[ -n "$_sd" && -d "$_sd/.git" && -f "$_sd/package.json" ]]; then
+    METABOT_HOME="$_sd"
+  else
+    METABOT_HOME="$HOME/metabot"
+  fi
+fi
+
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+BLUE='\033[0;34m'
+YELLOW='\033[1;33m'
+BOLD='\033[1m'
+NC='\033[0m'
+
+info()    { echo -e "${BLUE}[INFO]${NC} $*"; }
+success() { echo -e "${GREEN}[OK]${NC} $*"; }
+warn()    { echo -e "${YELLOW}[WARN]${NC} $*"; }
+error()   { echo -e "${RED}[ERROR]${NC} $*"; }
+
+cmd_update() {
+  if [[ ! -d "$METABOT_HOME/.git" ]]; then
+    error "MetaBot not found at $METABOT_HOME"
+    echo "  Run the installer first: curl -fsSL https://raw.githubusercontent.com/xvirobotics/metabot/main/install.sh | bash"
+    exit 1
+  fi
+
+  # Always re-exec from the repo copy before doing anything.
+  # This prevents the running script (e.g. ~/.local/bin/metabot) from being
+  # overwritten mid-execution when we copy CLI tools later.
+  if [[ -z "${METABOT_REEXEC:-}" ]] && [[ -f "$METABOT_HOME/bin/metabot" ]]; then
+    export METABOT_REEXEC=1
+    exec "$METABOT_HOME/bin/metabot" update
+  fi
+
+  info "Pulling latest code..."
+  cd "$METABOT_HOME"
+  local old_head
+  old_head="$(git rev-parse HEAD)"
+  git pull --ff-only || { error "git pull failed"; exit 1; }
+
+  # Re-exec if git pull updated this script (the repo copy we're running from)
+  if ! git diff --quiet "$old_head" HEAD -- bin/metabot 2>/dev/null; then
+    info "metabot CLI updated, re-launching with new version..."
+    exec "$METABOT_HOME/bin/metabot" update
+  fi
+
+  info "Installing dependencies..."
+  npm install --production=false
+
+  info "Building..."
+  npm run build
+
+  # Update CLI tools in ~/.local/bin
+  LOCAL_BIN="$HOME/.local/bin"
+  if [[ -d "$LOCAL_BIN" ]]; then
+    info "Updating CLI tools..."
+    for cli in mb mm metabot; do
+      if [[ -f "$METABOT_HOME/bin/$cli" ]]; then
+        cp "$METABOT_HOME/bin/$cli" "$LOCAL_BIN/$cli"
+        chmod +x "$LOCAL_BIN/$cli"
+      fi
+    done
+    success "CLI tools updated"
+  fi
+
+  # Update skills in ~/.claude/skills and ~/.codex/skills
+  SKILLS_DIR="$HOME/.claude/skills"
+  CODEX_SKILLS_DIR="$HOME/.codex/skills"
+  AGENTS_SKILLS_DIR="$HOME/.agents/skills"
+  mkdir -p "$SKILLS_DIR" "$CODEX_SKILLS_DIR"
+  info "Updating skills..."
+  local src=""
+  local -a lark_skill_names=(
+    lark-base
+    lark-calendar
+    lark-contact
+    lark-doc
+    lark-drive
+    lark-event
+    lark-im
+    lark-mail
+    lark-minutes
+    lark-openapi-explorer
+    lark-shared
+    lark-sheets
+    lark-skill-maker
+    lark-task
+    lark-vc
+    lark-whiteboard
+    lark-wiki
+    lark-workflow-meeting-summary
+    lark-workflow-standup-report
+  )
+  # metaskill / metaschedule are opt-in (not in the default list); CC native
+  # CronCreate / /loop already cover ad-hoc scheduling. Sources still ship in
+  # src/skills/* — users who want them can copy manually.
+  for skill in metamemory metabot voice skill-hub; do
+    case "$skill" in
+      metamemory) src="$METABOT_HOME/src/memory/skill" ;;
+      metabot)    src="$METABOT_HOME/src/skills/metabot" ;;
+      voice)      src="$METABOT_HOME/src/skills/voice" ;;
+      skill-hub)  src="$METABOT_HOME/src/skills/skill-hub" ;;
+      *)          src="" ;;
+    esac
+    if [[ -n "$src" && -d "$src" ]]; then
+      for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+        mkdir -p "$dst_root/$skill"
+        cp -r "$src/." "$dst_root/$skill/"
+      done
+    fi
+  done
+  # Clean up legacy feishu-doc skill
+  if [[ -d "$SKILLS_DIR/feishu-doc" ]]; then
+    rm -rf "$SKILLS_DIR/feishu-doc"
+    info "Removed legacy feishu-doc skill"
+  fi
+  if [[ -d "$CODEX_SKILLS_DIR/feishu-doc" ]]; then
+    rm -rf "$CODEX_SKILLS_DIR/feishu-doc"
+  fi
+  # Clean up legacy metaskill — now opt-in. Override with KEEP_METASKILL=1.
+  if [[ -d "$SKILLS_DIR/metaskill" ]] && [[ "${KEEP_METASKILL:-}" != "1" ]]; then
+    rm -rf "$SKILLS_DIR/metaskill"
+    info "Removed legacy metaskill (opt-in — set KEEP_METASKILL=1 to keep)"
+  fi
+  if [[ -d "$CODEX_SKILLS_DIR/metaskill" ]] && [[ "${KEEP_METASKILL:-}" != "1" ]]; then
+    rm -rf "$CODEX_SKILLS_DIR/metaskill"
+  fi
+
+  # Update lark-cli and its AI Agent skills only if previously installed.
+  # New installs still opt in via install.sh; updates keep existing setups fresh.
+  local has_lark_skills=false
+  local skill_root
+  for skill_root in "$AGENTS_SKILLS_DIR" "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+    if [[ -d "$skill_root/lark-doc" ]]; then
+      has_lark_skills=true
+      break
+    fi
+  done
+  if command -v lark-cli &>/dev/null; then
+    info "Updating lark-cli..."
+    if npm install -g @larksuite/cli@latest 2>/dev/null || npm install -g --prefix "$HOME/.local" @larksuite/cli@latest 2>/dev/null; then
+      success "lark-cli updated ($(lark-cli --version 2>/dev/null || echo 'version unknown'))"
+    else
+      warn "lark-cli update failed; MetaBot update will continue"
+    fi
+    has_lark_skills=true
+  fi
+  if [[ "$has_lark_skills" == "true" ]]; then
+    info "Updating lark-cli AI Agent skills..."
+    if npx skills add larksuite/cli --all -y -g 2>/dev/null; then
+      success "lark-cli AI Agent skills updated"
+    else
+      warn "lark-cli skills update failed; keeping existing installed copies"
+    fi
+    # Mirror lark-cli skills into Claude/Codex skill roots. Recent lark-cli
+    # installs use ~/.agents/skills, while older installs may use ~/.claude.
+    local lark_skill
+    for lark_skill in "${lark_skill_names[@]}"; do
+      local lark_src=""
+      for skill_root in "$AGENTS_SKILLS_DIR" "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+        if [[ -d "$skill_root/$lark_skill" ]]; then
+          lark_src="$skill_root/$lark_skill"
+          break
+        fi
+      done
+      if [[ -n "$lark_src" ]]; then
+        for dst_root in "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+          mkdir -p "$dst_root/$lark_skill"
+          if [[ "$lark_src" != "$dst_root/$lark_skill" ]]; then
+            cp -r "$lark_src/." "$dst_root/$lark_skill/"
+          fi
+        done
+      fi
+    done
+  fi
+  success "Skills updated"
+
+  # Update workspace skills if bots.json exists
+  if [[ -f "$METABOT_HOME/bots.json" ]] && command -v node &>/dev/null; then
+    local work_dir
+    work_dir=$(node -e "
+      const c=JSON.parse(require('fs').readFileSync('$METABOT_HOME/bots.json','utf-8'));
+      const b=[...(c.feishuBots||[]),...(c.telegramBots||[]),...(c.wechatBots||[])];
+      if(b[0])console.log(b[0].defaultWorkingDirectory);
+    " 2>/dev/null || true)
+    if [[ -n "$work_dir" ]]; then
+      local ws_skills_dir="$work_dir/.claude/skills"
+      local ws_codex_skills_dir="$work_dir/.codex/skills"
+      mkdir -p "$ws_skills_dir" "$ws_codex_skills_dir"
+
+      # Copy common skills
+      for skill in metamemory metabot voice skill-hub; do
+        if [[ -d "$SKILLS_DIR/$skill" ]]; then
+          for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
+            mkdir -p "$dst_root/$skill"
+            cp -r "$SKILLS_DIR/$skill/." "$dst_root/$skill/"
+          done
+        fi
+      done
+      # Mirror opt-in skills (metaskill / metaschedule) only when present.
+      for skill in metaskill metaschedule; do
+        if [[ -d "$SKILLS_DIR/$skill" ]]; then
+          for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
+            mkdir -p "$dst_root/$skill"
+            cp -r "$SKILLS_DIR/$skill/." "$dst_root/$skill/"
+          done
+        fi
+      done
+      # Copy lark-cli skills if previously installed
+      if [[ "$has_lark_skills" == "true" ]]; then
+        local lark_skill
+        for lark_skill in "${lark_skill_names[@]}"; do
+          local lark_src=""
+          for skill_root in "$AGENTS_SKILLS_DIR" "$SKILLS_DIR" "$CODEX_SKILLS_DIR"; do
+            if [[ -d "$skill_root/$lark_skill" ]]; then
+              lark_src="$skill_root/$lark_skill"
+              break
+            fi
+          done
+          if [[ -n "$lark_src" ]]; then
+            for dst_root in "$ws_skills_dir" "$ws_codex_skills_dir"; do
+              mkdir -p "$dst_root/$lark_skill"
+              cp -r "$lark_src/." "$dst_root/$lark_skill/"
+            done
+          fi
+        done
+      fi
+      # Clean up legacy feishu-doc in workspace
+      if [[ -d "$ws_skills_dir/feishu-doc" ]]; then
+        rm -rf "$ws_skills_dir/feishu-doc"
+      fi
+      if [[ -d "$ws_codex_skills_dir/feishu-doc" ]]; then
+        rm -rf "$ws_codex_skills_dir/feishu-doc"
+      fi
+      # Update CLAUDE.md
+      if [[ -f "$METABOT_HOME/src/workspace/CLAUDE.md" ]]; then
+        cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$work_dir/CLAUDE.md"
+        if [[ ! -e "$work_dir/AGENTS.md" ]]; then
+          cp "$METABOT_HOME/src/workspace/CLAUDE.md" "$work_dir/AGENTS.md"
+        fi
+      fi
+      success "Workspace skills updated"
+    fi
+  fi
+
+  info "Restarting MetaBot..."
+  pm2 restart metabot 2>/dev/null || pm2 start ecosystem.config.cjs
+  pm2 save --force 2>/dev/null || true
+
+  success "MetaBot updated and restarted!"
+}
+
+cmd_start()   { pm2 start "$METABOT_HOME/ecosystem.config.cjs"; pm2 save --force 2>/dev/null || true; }
+cmd_stop()    { pm2 stop metabot; }
+cmd_restart() { pm2 restart metabot; }
+cmd_logs()    { pm2 logs metabot "${@}"; }
+cmd_status()  { pm2 describe metabot; }
+
+case "${1:-help}" in
+  update|up)    cmd_update ;;
+  start)        cmd_start ;;
+  stop)         cmd_stop ;;
+  restart|rs)   cmd_restart ;;
+  logs|log)     shift; cmd_logs "$@" ;;
+  status|st)    cmd_status ;;
+  *)
+    echo -e "${BOLD}metabot${NC} - MetaBot management CLI"
+    echo ""
+    echo "  metabot update     Pull latest, rebuild, and restart"
+    echo "  metabot start      Start MetaBot with PM2"
+    echo "  metabot stop       Stop MetaBot"
+    echo "  metabot restart    Restart MetaBot"
+    echo "  metabot logs       View live logs (pass -n 100 etc.)"
+    echo "  metabot status     Show PM2 process status"
+    ;;
+esac

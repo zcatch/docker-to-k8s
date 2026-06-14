@@ -39,3 +39,4 @@
 | 4.1 Git 进阶 | _待学习_ |
 | 4.4 Jenkins | [jenkins-setup.md](jenkins-setup.md) |
 | 实践项目 | [blog-cicd-setup.md](blog-cicd-setup.md) — 博客项目接入 CI/CD |
+| 扩展：MetaBot | [metabot-feishu.md](metabot-feishu.md) — MetaBot 桥接 + 飞书移动端编码 |

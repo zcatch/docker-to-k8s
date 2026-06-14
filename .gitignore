@@ -1,5 +1,19 @@
 # 环境变量（含密码）
 .env
+
+# Bot
+bot/node_modules/
+bot/incoming.json
+
+# MetaBot（飞书桥接）
+metabot/node_modules/
+metabot/dist/
+metabot/.env
+metabot/bots.json
+metabot/logs/
+metabot/data/
+metabot/nohup.out
+
 .claude/settings.local.json
 
 # 二进制文件（Dockerfile 里直接下载 Linux 版）
